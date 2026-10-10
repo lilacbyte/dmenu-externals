@@ -1,0 +1,66 @@
+diff --git a/dmenu_run b/dmenu_run
+--- a/dmenu_run
++++ b/dmenu_run
+@@ -1,2 +1,61 @@
+ #!/bin/sh
+-dmenu_path | dmenu "$@" | ${SHELL:-"/bin/sh"} &
++# copyright 2026 mia
++set -eu
++
++entries=$(mktemp)
++trap 'rm -f "$entries"' EXIT
++trap 'exit 1' HUP INT TERM
++
++data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
++data_dirs=${XDG_DATA_DIRS:-/usr/local/share:/usr/share:/var/lib/flatpak/exports/share:/var/lib/snapd/desktop}
++# user entries override system entries, including hidden entries.
++printf '%s\n' "$data_home:$data_home/flatpak/exports/share:$data_dirs" |
++tr ':' '\n' |
++while IFS= read -r directory; do
++	[ -n "$directory" ] || continue
++	for desktop in "$directory"/applications/*.desktop; do
++		[ -f "$desktop" ] || continue
++		awk -v file="$desktop" '
++			BEGIN {
++				n = split(file, parts, "/")
++				id = parts[n]
++				if (id ~ /^appimagekit_/) kind = "appimage"
++				if (file ~ /\/flatpak\/exports\/share\/applications\//) kind = "flatpak"
++				if (file ~ /\/snapd\/desktop\/applications\//) kind = "snap"
++			}
++			{ sub(/\r$/, "") }
++			/^\[Desktop Entry\]$/ { entry = 1; next }
++			/^\[/ { entry = 0 }
++			entry && /^Name=/ { name = substr($0, 6) }
++			entry && /^Type=/ { type = substr($0, 6) }
++			entry && /^Exec=./ { executable = 1 }
++			entry && /^TryExec=/ { tryexec = substr($0, 9) }
++			entry && /^X-Flatpak=./ { kind = "flatpak" }
++			entry && /^X-SnapInstanceName=./ { kind = "snap" }
++			entry && /^(Hidden|NoDisplay)=true$/ { hidden = 1 }
++			END {
++				if (hidden || type != "Application" || !executable || !name) name = "-"
++				printf "%s\t%s\t%s\t%s\t%s\n", id, name, kind ? kind : "-", tryexec ? tryexec : "-", file
++			}
++		' "$desktop"
++	done
++done |
++awk -F '\t' '!seen[$1]++' |
++while IFS="$(printf '\t')" read -r id name kind tryexec desktop; do
++	[ "$name" != - ] && [ "$kind" != - ] || continue
++	if [ "$tryexec" != - ]; then
++		command -v "$tryexec" >/dev/null 2>&1 || continue
++	fi
++	printf '%s [%s: %s]\t%s\n' "$name" "$kind" "${id%.desktop}" "$desktop"
++done > "$entries"
++
++choice=$({ dmenu_path; cut -f1 "$entries"; } | sort -u | dmenu "$@") || exit 0
++[ -n "$choice" ] || exit 0
++while IFS="$(printf '\t')" read -r name desktop; do
++	if [ "$choice" = "$name" ]; then
++		# gio preserves exported commands, quoted paths and desktop field codes.
++		gio launch "$desktop"
++		exit $?
++	fi
++done < "$entries"
++"${SHELL:-/bin/sh}" -c "$choice"
